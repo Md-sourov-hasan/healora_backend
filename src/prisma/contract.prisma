@@ -1,0 +1,2255 @@
+// use prisma-8
+
+// =============================================================================
+// Healora Hub Management Platform — data contract
+// Source: Healora_Hub_Management_PRD.md (3 Nov 2026)
+//
+// Postgres schemas (namespaces) mirror the PRD's ownership boundaries so that
+// database grants can enforce them too (PRD §5.2 rule 5, §10.1):
+//
+//   identity  — staff accounts, scoped role assignments, credentials, break-glass
+//   hub       — regions, hubs, sessions, capacity, rosters, stations, equipment,
+//               bookings, queue, operational exceptions   (operational data)
+//   clinical  — patients, caregivers, consent, protocols, encounters,
+//               observations, reviews, notes                (sensitive health data)
+//   ops       — audit log, domain-event outbox, sync ledger, devices,
+//               notifications, exports
+//
+// Conventions
+//   * Every id is a UUIDv7. Clients may supply their own id on create (the
+//     explicit value wins over @onCreate) — the mobile app relies on this for
+//     stable, offline-generated observation ids (PRD §9.9, §10.6).
+//   * Instants are timestamptz stored/rendered via TimestamptzString; the API
+//     layer renders them in the hub's timezone (Asia/Dhaka).
+//   * Clinical rows are append-only/versioned: corrections create a new row
+//     pointing at the one it supersedes. Nothing in `clinical` is hard-deleted.
+//   * Only the owning side of each relation is declared; Prisma derives the
+//     back-references.
+// =============================================================================
+
+types {
+  Id        = Uuid @onCreate(uuid(7))
+  Ref       = Uuid
+  Instant   = TimestamptzString
+  CreatedAt = TimestamptzString @onCreate(now())
+  UpdatedAt = TimestamptzString @onCreate(now()) @onUpdate(now())
+}
+
+model mixin Timestamps {
+  createdAt CreatedAt @map("created_at")
+  updatedAt UpdatedAt @map("updated_at")
+}
+
+// =============================================================================
+// Enums (enums must be declared at top level)
+// =============================================================================
+
+// ---- identity ---------------------------------------------------------------
+
+enum UserStatus {
+  @@type("pg/text@1")
+  invited   = "invited"
+  active    = "active"
+  suspended = "suspended"
+  disabled  = "disabled"
+}
+
+/// Website roles (PRD §6.1) and shared-app permission profiles (PRD §6.2).
+enum StaffRole {
+  @@type("pg/text@1")
+  platform_super_admin   = "platform_super_admin"
+  regional_ops_manager   = "regional_ops_manager"
+  hub_manager            = "hub_manager"
+  reception_officer      = "reception_officer"
+  queue_coordinator      = "queue_coordinator"
+  equipment_officer      = "equipment_officer"
+  operations_auditor     = "operations_auditor"
+  clinical_ops_admin     = "clinical_ops_admin"
+  special_team_lead      = "special_team_lead"
+  field_health_worker    = "field_health_worker"
+  local_doctor           = "local_doctor"
+  registered_doctor      = "registered_doctor"
+}
+
+enum ScopeType {
+  @@type("pg/text@1")
+  platform = "platform"
+  region   = "region"
+  hub      = "hub"
+  session  = "session"
+}
+
+enum AssignmentStatus {
+  @@type("pg/text@1")
+  active  = "active"
+  revoked = "revoked"
+  expired = "expired"
+}
+
+enum CredentialStatus {
+  @@type("pg/text@1")
+  pending   = "pending"
+  verified  = "verified"
+  rejected  = "rejected"
+  expired   = "expired"
+  suspended = "suspended"
+}
+
+enum ReviewOutcome {
+  @@type("pg/text@1")
+  pending       = "pending"
+  justified     = "justified"
+  not_justified = "not_justified"
+}
+
+enum AuthSubjectKind {
+  @@type("pg/text@1")
+  staff   = "staff"
+  patient = "patient"
+}
+
+enum ChallengeKind {
+  @@type("pg/text@1")
+  staff_mfa      = "staff_mfa"
+  patient_otp    = "patient_otp"
+  patient_select = "patient_select"
+}
+
+// ---- hub ----------------------------------------------------------------------
+
+enum RegionLevel {
+  @@type("pg/text@1")
+  operational_region = "operational_region"
+  division           = "division"
+  district           = "district"
+  upazila            = "upazila"
+  union              = "union"
+  ward               = "ward"
+  village            = "village"
+}
+
+enum HubStatus {
+  @@type("pg/text@1")
+  draft              = "draft"
+  active             = "active"
+  paused             = "paused"
+  temporarily_closed = "temporarily_closed"
+  permanently_closed = "permanently_closed"
+}
+
+enum HubOperatorType {
+  @@type("pg/text@1")
+  healora_owned  = "healora_owned"
+  partner_clinic = "partner_clinic"
+  rented         = "rented"
+  temporary_site = "temporary_site"
+}
+
+enum HubBlockType {
+  @@type("pg/text@1")
+  closure        = "closure"
+  pause          = "pause"
+  capacity_block = "capacity_block"
+}
+
+enum OfferingStatus {
+  @@type("pg/text@1")
+  proposed  = "proposed"
+  approved  = "approved"
+  suspended = "suspended"
+  retired   = "retired"
+}
+
+enum RecordStatus {
+  @@type("pg/text@1")
+  active   = "active"
+  inactive = "inactive"
+}
+
+enum SessionType {
+  @@type("pg/text@1")
+  standard_clinic = "standard_clinic"
+  special_camp    = "special_camp"
+  outreach_event  = "outreach_event"
+  other           = "other"
+}
+
+enum SessionStatus {
+  @@type("pg/text@1")
+  draft            = "draft"
+  published        = "published"
+  open_for_booking = "open_for_booking"
+  full             = "full"
+  in_progress      = "in_progress"
+  paused           = "paused"
+  completed        = "completed"
+  cancelled        = "cancelled"
+}
+
+enum RequirementKind {
+  @@type("pg/text@1")
+  staff_role     = "staff_role"
+  station_type   = "station_type"
+  equipment_type = "equipment_type"
+}
+
+enum ShiftStatus {
+  @@type("pg/text@1")
+  proposed    = "proposed"
+  approved    = "approved"
+  checked_in  = "checked_in"
+  checked_out = "checked_out"
+  absent      = "absent"
+  cancelled   = "cancelled"
+}
+
+enum StationType {
+  @@type("pg/text@1")
+  registration  = "registration"
+  vitals        = "vitals"
+  doctor_review = "doctor_review"
+  counselling   = "counselling"
+  waiting       = "waiting"
+  other         = "other"
+}
+
+enum StationStatus {
+  @@type("pg/text@1")
+  available      = "available"
+  busy           = "busy"
+  paused         = "paused"
+  out_of_service = "out_of_service"
+}
+
+enum EquipmentCategory {
+  @@type("pg/text@1")
+  bp_monitor      = "bp_monitor"
+  glucometer      = "glucometer"
+  weighing_scale  = "weighing_scale"
+  stadiometer     = "stadiometer"
+  thermometer     = "thermometer"
+  pulse_oximeter  = "pulse_oximeter"
+  tablet          = "tablet"
+  printer         = "printer"
+  other           = "other"
+}
+
+enum EquipmentStatus {
+  @@type("pg/text@1")
+  available       = "available"
+  assigned        = "assigned"
+  maintenance     = "maintenance"
+  calibration_due = "calibration_due"
+  out_of_service  = "out_of_service"
+  retired         = "retired"
+}
+
+enum EquipmentEventKind {
+  @@type("pg/text@1")
+  inspection     = "inspection"
+  calibration    = "calibration"
+  maintenance    = "maintenance"
+  fault_reported = "fault_reported"
+  fault_resolved = "fault_resolved"
+  status_change  = "status_change"
+}
+
+enum BookingSource {
+  @@type("pg/text@1")
+  patient_app           = "patient_app"
+  operations_assignment = "operations_assignment"
+  campaign              = "campaign"
+  referral              = "referral"
+  local_doctor          = "local_doctor"
+  walk_in               = "walk_in"
+}
+
+enum HubAssignmentBasis {
+  @@type("pg/text@1")
+  patient_choice        = "patient_choice"
+  operations_assignment = "operations_assignment"
+  campaign              = "campaign"
+  referral              = "referral"
+  walk_in               = "walk_in"
+  catchment_default     = "catchment_default"
+}
+
+enum AppointmentStatus {
+  @@type("pg/text@1")
+  pending_confirmation = "pending_confirmation"
+  confirmed            = "confirmed"
+  arrived              = "arrived"
+  checked_in           = "checked_in"
+  in_service           = "in_service"
+  completed            = "completed"
+  cancelled            = "cancelled"
+  no_show              = "no_show"
+  unable_to_complete   = "unable_to_complete"
+  referred             = "referred"
+}
+
+enum WaitlistStatus {
+  @@type("pg/text@1")
+  waiting   = "waiting"
+  offered   = "offered"
+  booked    = "booked"
+  expired   = "expired"
+  cancelled = "cancelled"
+}
+
+enum QueueStatus {
+  @@type("pg/text@1")
+  waiting        = "waiting"
+  called         = "called"
+  in_service     = "in_service"
+  awaiting_review = "awaiting_review"
+  paused         = "paused"
+  transferred    = "transferred"
+  completed      = "completed"
+  cancelled      = "cancelled"
+  no_show        = "no_show"
+  referred       = "referred"
+}
+
+enum DelayReason {
+  @@type("pg/text@1")
+  station_unavailable = "station_unavailable"
+  staff_unavailable   = "staff_unavailable"
+  sync_pending        = "sync_pending"
+  equipment_issue     = "equipment_issue"
+  high_volume         = "high_volume"
+  other               = "other"
+}
+
+enum ExceptionType {
+  @@type("pg/text@1")
+  unassigned_encounter           = "unassigned_encounter"
+  not_called_within_threshold    = "not_called_within_threshold"
+  task_not_submitted             = "task_not_submitted"
+  required_measurement_missing   = "required_measurement_missing"
+  unsynced_device_data           = "unsynced_device_data"
+  sync_rejected                  = "sync_rejected"
+  awaiting_doctor_review         = "awaiting_doctor_review"
+  completed_with_unresolved_steps = "completed_with_unresolved_steps"
+  equipment_fault                = "equipment_fault"
+  insufficient_staffing          = "insufficient_staffing"
+  potential_duplicate_patient    = "potential_duplicate_patient"
+  late_sync_quarantined          = "late_sync_quarantined"
+}
+
+enum Severity {
+  @@type("pg/text@1")
+  low      = "low"
+  medium   = "medium"
+  high     = "high"
+  critical = "critical"
+}
+
+enum ExceptionStatus {
+  @@type("pg/text@1")
+  open         = "open"
+  acknowledged = "acknowledged"
+  escalated    = "escalated"
+  resolved     = "resolved"
+  dismissed    = "dismissed"
+}
+
+// ---- clinical -----------------------------------------------------------------
+
+enum PatientStatus {
+  @@type("pg/text@1")
+  active   = "active"
+  inactive = "inactive"
+  merged   = "merged"
+  deceased = "deceased"
+}
+
+enum Sex {
+  @@type("pg/text@1")
+  female  = "female"
+  male    = "male"
+  other   = "other"
+  unknown = "unknown"
+}
+
+enum PatientIdentifierType {
+  @@type("pg/text@1")
+  national_id         = "national_id"
+  birth_registration  = "birth_registration"
+  passport            = "passport"
+  healora_card        = "healora_card"
+  other               = "other"
+}
+
+enum DuplicateStatus {
+  @@type("pg/text@1")
+  open                = "open"
+  confirmed_duplicate = "confirmed_duplicate"
+  not_duplicate       = "not_duplicate"
+}
+
+enum RepresentativeRelationship {
+  @@type("pg/text@1")
+  parent             = "parent"
+  legal_guardian     = "legal_guardian"
+  spouse             = "spouse"
+  child              = "child"
+  sibling            = "sibling"
+  other_relative     = "other_relative"
+  authorised_carer   = "authorised_carer"
+}
+
+enum ConsentPurpose {
+  @@type("pg/text@1")
+  hub_service             = "hub_service"
+  health_data_processing  = "health_data_processing"
+  teleconsultation        = "teleconsultation"
+  overseas_sharing        = "overseas_sharing"
+  caregiver_authority     = "caregiver_authority"
+  call_recording          = "call_recording"
+  marketing               = "marketing"
+}
+
+enum ConsentMethod {
+  @@type("pg/text@1")
+  app_acceptance    = "app_acceptance"
+  digital_signature = "digital_signature"
+  verbal_witnessed  = "verbal_witnessed"
+  paper_scanned     = "paper_scanned"
+  thumbprint        = "thumbprint"
+}
+
+enum ConsentStatus {
+  @@type("pg/text@1")
+  granted   = "granted"
+  withdrawn = "withdrawn"
+  expired   = "expired"
+}
+
+enum ProtocolStatus {
+  @@type("pg/text@1")
+  draft    = "draft"
+  approved = "approved"
+  retired  = "retired"
+}
+
+enum ObservationValueType {
+  @@type("pg/text@1")
+  quantity = "quantity"
+  coded    = "coded"
+  text     = "text"
+  scale    = "scale"
+}
+
+enum AlertAction {
+  @@type("pg/text@1")
+  repeat_measurement = "repeat_measurement"
+  contact_doctor     = "contact_doctor"
+  urgent_review      = "urgent_review"
+  referral           = "referral"
+}
+
+enum EncounterType {
+  @@type("pg/text@1")
+  hub_visit    = "hub_visit"
+  home_visit   = "home_visit"
+  teleconsult  = "teleconsult"
+}
+
+enum EncounterStatus {
+  @@type("pg/text@1")
+  created                = "created"
+  assigned               = "assigned"
+  in_progress            = "in_progress"
+  awaiting_remeasurement = "awaiting_remeasurement"
+  awaiting_sync          = "awaiting_sync"
+  sync_failed            = "sync_failed"
+  submitted_for_review   = "submitted_for_review"
+  reviewed               = "reviewed"
+  referred               = "referred"
+  escalated              = "escalated"
+  unable_to_complete     = "unable_to_complete"
+  completed              = "completed"
+}
+
+enum EncounterDisposition {
+  @@type("pg/text@1")
+  completed          = "completed"
+  follow_up_required = "follow_up_required"
+  referred           = "referred"
+  unable_to_complete = "unable_to_complete"
+}
+
+enum IdentityMatchStatus {
+  @@type("pg/text@1")
+  unresolved = "unresolved"
+  confirmed  = "confirmed"
+}
+
+enum TeamAssignmentStatus {
+  @@type("pg/text@1")
+  assigned    = "assigned"
+  accepted    = "accepted"
+  started     = "started"
+  transferred = "transferred"
+  released    = "released"
+  completed   = "completed"
+}
+
+enum TaskStatus {
+  @@type("pg/text@1")
+  pending  = "pending"
+  captured = "captured"
+  missing  = "missing"
+  waived   = "waived"
+}
+
+enum MissingReason {
+  @@type("pg/text@1")
+  patient_declined     = "patient_declined"
+  patient_unable       = "patient_unable"
+  equipment_unavailable = "equipment_unavailable"
+  not_clinically_indicated = "not_clinically_indicated"
+  time_constraint      = "time_constraint"
+  other                = "other"
+}
+
+enum ObservationSource {
+  @@type("pg/text@1")
+  hub_visit       = "hub_visit"
+  home_visit      = "home_visit"
+  patient_entered = "patient_entered"
+  device_import   = "device_import"
+  teleconsult     = "teleconsult"
+}
+
+enum ObservationStatus {
+  @@type("pg/text@1")
+  preliminary      = "preliminary"
+  final            = "final"
+  amended          = "amended"
+  superseded       = "superseded"
+  entered_in_error = "entered_in_error"
+  quarantined      = "quarantined"
+}
+
+enum ValidationStatus {
+  @@type("pg/text@1")
+  valid        = "valid"
+  implausible  = "implausible"
+  rejected     = "rejected"
+}
+
+enum ReviewStatus {
+  @@type("pg/text@1")
+  not_required = "not_required"
+  pending      = "pending"
+  reviewed     = "reviewed"
+}
+
+enum AlertStatus {
+  @@type("pg/text@1")
+  open         = "open"
+  acknowledged = "acknowledged"
+  resolved     = "resolved"
+}
+
+enum ReviewDecision {
+  @@type("pg/text@1")
+  reviewed_no_action      = "reviewed_no_action"
+  remeasurement_requested = "remeasurement_requested"
+  follow_up               = "follow_up"
+  teleconsult             = "teleconsult"
+  referral                = "referral"
+  urgent_review           = "urgent_review"
+}
+
+enum NoteType {
+  @@type("pg/text@1")
+  factual_worker_note   = "factual_worker_note"
+  clinical_assessment   = "clinical_assessment"
+  follow_up_instruction = "follow_up_instruction"
+  handover              = "handover"
+}
+
+enum RequestStatus {
+  @@type("pg/text@1")
+  open      = "open"
+  fulfilled = "fulfilled"
+  cancelled = "cancelled"
+}
+
+enum EscalationType {
+  @@type("pg/text@1")
+  emergency          = "emergency"
+  urgent_clinical    = "urgent_clinical"
+  referral           = "referral"
+  operational        = "operational"
+}
+
+// ---- ops ----------------------------------------------------------------------
+
+enum AuditOutcome {
+  @@type("pg/text@1")
+  success = "success"
+  denied  = "denied"
+  error   = "error"
+}
+
+enum AuditPriority {
+  @@type("pg/text@1")
+  normal = "normal"
+  high   = "high"
+}
+
+enum SyncStatus {
+  @@type("pg/text@1")
+  accepted    = "accepted"
+  duplicate   = "duplicate"
+  rejected    = "rejected"
+  quarantined = "quarantined"
+  resolved    = "resolved"
+}
+
+enum SyncErrorCategory {
+  @@type("pg/text@1")
+  validation          = "validation"
+  permission          = "permission"
+  identity_mismatch   = "identity_mismatch"
+  encounter_closed    = "encounter_closed"
+  encounter_reassigned = "encounter_reassigned"
+  auth_expired        = "auth_expired"
+  conflict            = "conflict"
+  server_error        = "server_error"
+}
+
+enum DevicePlatform {
+  @@type("pg/text@1")
+  android = "android"
+  ios     = "ios"
+  web     = "web"
+}
+
+enum RecipientType {
+  @@type("pg/text@1")
+  patient = "patient"
+  staff   = "staff"
+}
+
+enum NotificationChannel {
+  @@type("pg/text@1")
+  push     = "push"
+  sms      = "sms"
+  whatsapp = "whatsapp"
+  in_app   = "in_app"
+  email    = "email"
+}
+
+enum NotificationStatus {
+  @@type("pg/text@1")
+  queued    = "queued"
+  sent      = "sent"
+  delivered = "delivered"
+  failed    = "failed"
+  suppressed = "suppressed"
+}
+
+enum ExportStatus {
+  @@type("pg/text@1")
+  requested = "requested"
+  approved  = "approved"
+  rejected  = "rejected"
+  generated = "generated"
+  expired   = "expired"
+}
+
+// =============================================================================
+// identity
+// =============================================================================
+
+namespace identity {
+
+  /// Individual staff account. One person = one account; no shared logins
+  /// (PRD §6.4). Patients are NOT users here — see clinical.Patient.
+  model User {
+    id               Id          @id
+    email            String      @unique
+    username         String?     @unique
+    name             String?
+    nameBn           String? @map("name_bn")
+    phone            String?
+    status           UserStatus  @default(active)
+    preferredLanguage String     @default("bn") @map("preferred_language")
+    mfaEnabled       Boolean     @default(false) @map("mfa_enabled")
+    lastLoginAt      Instant? @map("last_login_at")
+    disabledAt       Instant? @map("disabled_at")
+    disabledReason   String? @map("disabled_reason")
+    /// Emergency contact (only where operationally necessary, PRD §7 roster).
+    emergencyContactName  String? @map("emergency_contact_name")
+    emergencyContactPhone String? @map("emergency_contact_phone")
+    +Timestamps
+    @@map("user")
+  }
+
+  /// A role granted to a user within a scope. Every authorisation decision is
+  /// evaluated against an *active* row here (PRD §6.4). Revoking sets status
+  /// rather than deleting, so historical audit entries stay attributable.
+  model RoleAssignment {
+    id          Id               @id
+    userId      Ref @map("user_id")
+    user        User             @relation(fields: [userId], references: [id])
+    role        StaffRole
+    scopeType   ScopeType @map("scope_type")
+    regionId    Ref? @map("region_id")
+    region      hub.Region?      @relation(fields: [regionId], references: [id])
+    hubId       Ref? @map("hub_id")
+    hub         hub.Hub?         @relation(fields: [hubId], references: [id])
+    sessionId   Ref? @map("session_id")
+    session     hub.HubSession?  @relation(fields: [sessionId], references: [id])
+    status      AssignmentStatus @default(active)
+    validFrom   Instant @map("valid_from")
+    validTo     Instant? @map("valid_to")
+    supervisorUserId Ref? @map("supervisor_user_id")
+    supervisor  User?            @relation("RoleSupervisor", fields: [supervisorUserId], references: [id])
+    employmentType String? @map("employment_type")
+    grantedById Ref @map("granted_by_id")
+    grantedBy   User             @relation("RoleGrantedBy", fields: [grantedById], references: [id])
+    revokedAt   Instant? @map("revoked_at")
+    revokedById Ref? @map("revoked_by_id")
+    revokeReason String? @map("revoke_reason")
+    +Timestamps
+
+    @@index([userId, status])
+    @@index([hubId, status])
+    @@index([regionId, status])
+    @@check(expression: sql`(scope_type = 'platform' AND region_id IS NULL AND hub_id IS NULL AND session_id IS NULL) OR (scope_type = 'region' AND region_id IS NOT NULL) OR (scope_type = 'hub' AND hub_id IS NOT NULL) OR (scope_type = 'session' AND session_id IS NOT NULL)`, name: "role_assignment_scope")
+    @@map("role_assignment")
+  }
+
+  /// Verified professional designation / registration for clinical users
+  /// (PRD §6.2 "assistant doctor is not a legal qualification").
+  /// Managed only by platform / clinical operations.
+  model StaffCredential {
+    id                     Id               @id
+    userId                 Ref @map("user_id")
+    user                   User             @relation(fields: [userId], references: [id])
+    professionalDesignation String @map("professional_designation")
+    qualification          String
+    registrationBody       String? @map("registration_body")
+    registrationNumber     String? @map("registration_number")
+    issuedAt               DateString? @map("issued_at")
+    expiresAt              DateString? @map("expires_at")
+    /// Observation codes this person may collect under the approved protocol.
+    permittedObservationCodes String[] @map("permitted_observation_codes")
+    /// Roles this credential qualifies the person for.
+    qualifiesForRoles      StaffRole[] @map("qualifies_for_roles")
+    trainingCompletedAt    DateString? @map("training_completed_at")
+    status                 CredentialStatus @default(pending)
+    verifiedById           Ref? @map("verified_by_id")
+    verifiedBy             User?            @relation("CredentialVerifiedBy", fields: [verifiedById], references: [id])
+    verifiedAt             Instant? @map("verified_at")
+    evidenceRef            String? @map("evidence_ref")
+    displayOnPatientRecord Boolean          @default(true) @map("display_on_patient_record")
+    +Timestamps
+
+    @@index([userId, status])
+    @@index([registrationBody, registrationNumber], unique: true, name: "staff_credential_registration")
+    @@map("staff_credential")
+  }
+
+  /// Staff password credential + lockout state. Separate from User so the
+  /// hash never travels with ordinary user reads.
+  model StaffLogin {
+    userId            Ref      @id @map("user_id")
+    user              User     @relation(fields: [userId], references: [id])
+    passwordHash      String @map("password_hash")
+    passwordUpdatedAt Instant @map("password_updated_at")
+    mustChangePassword Boolean @default(true) @map("must_change_password")
+    failedAttempts    Int      @default(0) @map("failed_attempts")
+    lockedUntil       Instant? @map("locked_until")
+    lastFailedAt      Instant? @map("last_failed_at")
+    lastLoginAt       Instant? @map("last_login_at")
+    +Timestamps
+    @@map("staff_login")
+  }
+
+  /// TOTP factor; the secret is AES-256-GCM encrypted with AUTH_ENCRYPTION_KEY.
+  model MfaFactor {
+    id              Id       @id
+    userId          Ref @map("user_id")
+    user            User     @relation(fields: [userId], references: [id])
+    secretEncrypted String @map("secret_encrypted")
+    confirmedAt     Instant? @map("confirmed_at")
+    lastUsedStep    Int? @map("last_used_step")
+    disabledAt      Instant? @map("disabled_at")
+    createdAt       CreatedAt @map("created_at")
+    @@index([userId])
+    @@map("mfa_factor")
+  }
+
+  /// Refresh-token session. Tokens are stored as SHA-256 hashes only; each
+  /// refresh rotates the token and reuse of a rotated token revokes the family.
+  model AuthSession {
+    id                Id              @id
+    subjectKind       AuthSubjectKind @map("subject_kind")
+    userId            Ref? @map("user_id")
+    user              User?           @relation(fields: [userId], references: [id])
+    patientId         Ref? @map("patient_id")
+    patient           clinical.Patient? @relation(fields: [patientId], references: [id])
+    representativeId  Ref? @map("representative_id")
+    familyId          Ref @map("family_id")
+    refreshTokenHash  String          @unique @map("refresh_token_hash")
+    previousTokenHash String? @map("previous_token_hash")
+    amr               String[]
+    ip                String?
+    userAgent         String? @map("user_agent")
+    deviceInstallationId Ref? @map("device_installation_id")
+    createdAt         CreatedAt @map("created_at")
+    lastUsedAt        Instant @map("last_used_at")
+    idleExpiresAt     Instant @map("idle_expires_at")
+    absoluteExpiresAt Instant @map("absolute_expires_at")
+    revokedAt         Instant? @map("revoked_at")
+    revokeReason      String? @map("revoke_reason")
+    @@index([userId, revokedAt])
+    @@index([patientId, revokedAt])
+    @@index([familyId])
+    @@index([previousTokenHash])
+    @@check(expression: sql`(subject_kind = 'staff' AND user_id IS NOT NULL) OR (subject_kind = 'patient' AND patient_id IS NOT NULL)`, name: "auth_session_subject")
+    @@map("auth_session")
+  }
+
+  /// Short-lived login challenge (staff MFA step, patient OTP, profile pick).
+  model LoginChallenge {
+    id          Id            @id
+    kind        ChallengeKind
+    userId      Ref? @map("user_id")
+    phoneHash   String? @map("phone_hash")
+    codeHash    String? @map("code_hash")
+    patientIds  String[] @map("patient_ids")
+    attempts    Int           @default(0)
+    expiresAt   Instant @map("expires_at")
+    consumedAt  Instant? @map("consumed_at")
+    ip          String?
+    createdAt   CreatedAt @map("created_at")
+    @@index([phoneHash, createdAt])
+    @@map("login_challenge")
+  }
+
+  /// Time-limited emergency access to clinical data (PRD §6.4). Creating one
+  /// must also write a high-priority ops.AuditEvent.
+  model BreakGlassAccess {
+    id             Id            @id
+    userId         Ref @map("user_id")
+    user           User          @relation(fields: [userId], references: [id])
+    patientId      Ref @map("patient_id")
+    patient        clinical.Patient @relation(fields: [patientId], references: [id])
+    reason         String
+    startsAt       Instant @map("starts_at")
+    expiresAt      Instant @map("expires_at")
+    endedAt        Instant? @map("ended_at")
+    reviewOutcome  ReviewOutcome @default(pending) @map("review_outcome")
+    reviewedById   Ref? @map("reviewed_by_id")
+    reviewedBy     User?         @relation("BreakGlassReviewer", fields: [reviewedById], references: [id])
+    reviewedAt     Instant? @map("reviewed_at")
+    reviewNotes    String? @map("review_notes")
+    createdAt      CreatedAt @map("created_at")
+
+    @@index([patientId])
+    @@index([reviewOutcome])
+    @@check(expression: sql`expires_at > starts_at`, name: "break_glass_window")
+    @@map("break_glass_access")
+  }
+}
+
+// =============================================================================
+// hub — operational entities (PRD §11.1)
+// =============================================================================
+
+namespace hub {
+
+  /// Administrative / operational geography. Self-referencing tree
+  /// (division → district → upazila → union …).
+  model Region {
+    id        Id          @id
+    code      String      @unique
+    name      String
+    nameBn    String? @map("name_bn")
+    level     RegionLevel
+    parentId  Ref? @map("parent_id")
+    parent    Region?     @relation("RegionParent", fields: [parentId], references: [id])
+    status    RecordStatus @default(active)
+    +Timestamps
+
+    @@index([parentId])
+    @@map("region")
+  }
+
+  model Hub {
+    id                 Id              @id
+    code               String          @unique
+    name               String
+    nameBn             String? @map("name_bn")
+    status             HubStatus       @default(draft)
+    statusReason       String? @map("status_reason")
+    operatorType       HubOperatorType @default(healora_owned) @map("operator_type")
+    operatorName       String? @map("operator_name")
+    regionId           Ref @map("region_id")
+    region             Region          @relation(fields: [regionId], references: [id])
+    addressLine        String @map("address_line")
+    addressLineBn      String? @map("address_line_bn")
+    latitude           Numeric(9, 6)?
+    longitude          Numeric(9, 6)?
+    directions         String?
+    directionsBn       String? @map("directions_bn")
+    contactPhone       String? @map("contact_phone")
+    timezone           String          @default("Asia/Dhaka")
+    languages          String[]
+    accessibilityNotes String? @map("accessibility_notes")
+    /// Emergency / referral instructions approved by clinical ops (PRD §13.3).
+    emergencyContactName    String? @map("emergency_contact_name")
+    emergencyContactPhone   String? @map("emergency_contact_phone")
+    nearestReferralFacility String? @map("nearest_referral_facility")
+    referralFacilityPhone   String? @map("referral_facility_phone")
+    referralInstructions    String? @map("referral_instructions")
+    managerUserId      Ref? @map("manager_user_id")
+    manager            identity.User?  @relation("HubManager", fields: [managerUserId], references: [id])
+    regionalOwnerUserId Ref? @map("regional_owner_user_id")
+    regionalOwner      identity.User?  @relation("HubRegionalOwner", fields: [regionalOwnerUserId], references: [id])
+    activatedAt        Instant? @map("activated_at")
+    closedAt           Instant? @map("closed_at")
+    createdById        Ref @map("created_by_id")
+    createdBy          identity.User   @relation("HubCreatedBy", fields: [createdById], references: [id])
+    updatedById        Ref? @map("updated_by_id")
+    updatedBy          identity.User?  @relation("HubUpdatedBy", fields: [updatedById], references: [id])
+    +Timestamps
+
+    @@index([regionId, status])
+    @@check(expression: sql`(latitude IS NULL OR latitude BETWEEN -90 AND 90) AND (longitude IS NULL OR longitude BETWEEN -180 AND 180)`, name: "hub_coordinates")
+    @@map("hub")
+  }
+
+  /// Hub ↔ administrative-area catchment mapping (PRD §8.4). A polygon
+  /// geofence can be added later (P2) without changing this table.
+  model HubCatchment {
+    id        Id      @id
+    hubId     Ref @map("hub_id")
+    hub       Hub     @relation(fields: [hubId], references: [id])
+    regionId  Ref @map("region_id")
+    region    Region  @relation(fields: [regionId], references: [id])
+    isPrimary Boolean @default(true) @map("is_primary")
+    createdAt CreatedAt @map("created_at")
+
+    @@unique([hubId, regionId])
+    @@index([regionId])
+    @@map("hub_catchment")
+  }
+
+  /// Regular weekly opening hours. dayOfWeek: 1 = Monday … 7 = Sunday (ISO).
+  model HubOperatingHours {
+    id        Id         @id
+    hubId     Ref @map("hub_id")
+    hub       Hub        @relation(fields: [hubId], references: [id])
+    dayOfWeek Int @map("day_of_week")
+    opensAt   TimeString @map("opens_at")
+    closesAt  TimeString @map("closes_at")
+    +Timestamps
+
+    @@unique([hubId, dayOfWeek, opensAt])
+    @@check(expression: sql`day_of_week BETWEEN 1 AND 7`, name: "hub_hours_dow")
+    @@check(expression: sql`closes_at > opens_at`, name: "hub_hours_order")
+    @@map("hub_operating_hours")
+  }
+
+  /// Closure / pause / capacity block windows (PRD §7.1 item 20).
+  model HubAvailabilityBlock {
+    id              Id           @id
+    hubId           Ref @map("hub_id")
+    hub             Hub          @relation(fields: [hubId], references: [id])
+    blockType       HubBlockType @map("block_type")
+    startsAt        Instant @map("starts_at")
+    endsAt          Instant? @map("ends_at")
+    /// For capacity_block: percentage of normal capacity still available.
+    remainingCapacityPct Int? @map("remaining_capacity_pct")
+    reason          String
+    createdById     Ref @map("created_by_id")
+    createdBy       identity.User @relation(fields: [createdById], references: [id])
+    liftedAt        Instant? @map("lifted_at")
+    liftedById      Ref? @map("lifted_by_id")
+    createdAt       CreatedAt @map("created_at")
+
+    @@index([hubId, startsAt])
+    @@check(expression: sql`ends_at IS NULL OR ends_at > starts_at`, name: "hub_block_window")
+    @@check(expression: sql`remaining_capacity_pct IS NULL OR remaining_capacity_pct BETWEEN 0 AND 100`, name: "hub_block_pct")
+    @@map("hub_availability_block")
+  }
+
+  /// Centrally configured service catalogue (e.g. basic vitals, doctor review).
+  model ServiceType {
+    id                  Id      @id
+    code                String  @unique
+    name                String
+    nameBn              String? @map("name_bn")
+    description         String?
+    status              RecordStatus @default(active)
+    protocolId          Ref? @map("protocol_id")
+    protocol            clinical.ClinicalProtocol? @relation(fields: [protocolId], references: [id])
+    defaultSlotMinutes  Int     @default(15) @map("default_slot_minutes")
+    requiresDoctorReview Boolean @default(false) @map("requires_doctor_review")
+    +Timestamps
+
+    @@check(expression: sql`default_slot_minutes > 0`, name: "service_type_slot")
+    @@map("service_type")
+  }
+
+  /// Minimum staffing / stations / equipment required to run a service.
+  model ServiceTypeRequirement {
+    id                Id                 @id
+    serviceTypeId     Ref @map("service_type_id")
+    serviceType       ServiceType        @relation(fields: [serviceTypeId], references: [id])
+    kind              RequirementKind
+    staffRole         StaffRole? @map("staff_role")
+    stationType       StationType? @map("station_type")
+    equipmentCategory EquipmentCategory? @map("equipment_category")
+    minCount          Int                @default(1) @map("min_count")
+    mandatory         Boolean            @default(true)
+
+    @@index([serviceTypeId])
+    @@check(expression: sql`(kind = 'staff_role' AND staff_role IS NOT NULL) OR (kind = 'station_type' AND station_type IS NOT NULL) OR (kind = 'equipment_type' AND equipment_category IS NOT NULL)`, name: "service_requirement_kind")
+    @@check(expression: sql`min_count > 0`, name: "service_requirement_min")
+    @@map("service_type_requirement")
+  }
+
+  /// Which services a given hub is approved to offer (PRD §9.1 step 2).
+  model HubServiceOffering {
+    id            Id             @id
+    hubId         Ref @map("hub_id")
+    hub           Hub            @relation(fields: [hubId], references: [id])
+    serviceTypeId Ref @map("service_type_id")
+    serviceType   ServiceType    @relation(fields: [serviceTypeId], references: [id])
+    status        OfferingStatus @default(proposed)
+    approvedById  Ref? @map("approved_by_id")
+    approvedBy    identity.User? @relation(fields: [approvedById], references: [id])
+    approvedAt    Instant? @map("approved_at")
+    +Timestamps
+
+    @@unique([hubId, serviceTypeId])
+    @@map("hub_service_offering")
+  }
+
+  /// Template that generates HubSession rows on a schedule.
+  model SessionRecurrence {
+    id                  Id          @id
+    hubId               Ref @map("hub_id")
+    hub                 Hub         @relation(fields: [hubId], references: [id])
+    serviceTypeId       Ref @map("service_type_id")
+    serviceType         ServiceType @relation(fields: [serviceTypeId], references: [id])
+    title               String
+    sessionType         SessionType @default(standard_clinic) @map("session_type")
+    /// RFC 5545 RRULE, e.g. FREQ=WEEKLY;BYDAY=SU,TU,TH
+    rrule               String
+    startTime           TimeString @map("start_time")
+    endTime             TimeString @map("end_time")
+    startsOn            DateString @map("starts_on")
+    endsOn              DateString? @map("ends_on")
+    appointmentCapacity Int @map("appointment_capacity")
+    walkInCapacity      Int         @default(0) @map("walk_in_capacity")
+    slotMinutes         Int @map("slot_minutes")
+    status              RecordStatus @default(active)
+    createdById         Ref @map("created_by_id")
+    createdBy           identity.User @relation(fields: [createdById], references: [id])
+    +Timestamps
+
+    @@index([hubId])
+    @@map("session_recurrence")
+  }
+
+  /// A dated operating period at a hub; a camp is a session type (PRD §8.5).
+  /// Capacity counters are maintained transactionally by the booking service;
+  /// the check constraints are the last line of defence against overbooking.
+  model HubSession {
+    id                  Id            @id
+    hubId               Ref @map("hub_id")
+    hub                 Hub           @relation(fields: [hubId], references: [id])
+    serviceTypeId       Ref @map("service_type_id")
+    serviceType         ServiceType   @relation(fields: [serviceTypeId], references: [id])
+    recurrenceId        Ref? @map("recurrence_id")
+    recurrence          SessionRecurrence? @relation(fields: [recurrenceId], references: [id])
+    /// Protocol version in force for this session (snapshot).
+    protocolId          Ref? @map("protocol_id")
+    protocol            clinical.ClinicalProtocol? @relation(fields: [protocolId], references: [id])
+    title               String
+    titleBn             String? @map("title_bn")
+    sessionType         SessionType   @default(standard_clinic) @map("session_type")
+    status              SessionStatus @default(draft)
+    sessionDate         DateString @map("session_date")
+    startsAt            Instant @map("starts_at")
+    endsAt              Instant @map("ends_at")
+    timezone            String        @default("Asia/Dhaka")
+    /// Temporary camp venue when it differs from the hub's address.
+    venueAddress        String? @map("venue_address")
+    venueLatitude       Numeric(9, 6)? @map("venue_latitude")
+    venueLongitude      Numeric(9, 6)? @map("venue_longitude")
+    appointmentCapacity Int @map("appointment_capacity")
+    walkInCapacity      Int           @default(0) @map("walk_in_capacity")
+    bookedCount         Int           @default(0) @map("booked_count")
+    walkInCount         Int           @default(0) @map("walk_in_count")
+    slotMinutes         Int @map("slot_minutes")
+    bufferMinutes       Int           @default(0) @map("buffer_minutes")
+    lateArrivalGraceMinutes Int       @default(15) @map("late_arrival_grace_minutes")
+    allowOverbooking    Boolean       @default(false) @map("allow_overbooking")
+    waitlistEnabled     Boolean       @default(false) @map("waitlist_enabled")
+    bookingOpensAt      Instant? @map("booking_opens_at")
+    bookingClosesAt     Instant? @map("booking_closes_at")
+    eligibilityCriteria String? @map("eligibility_criteria")
+    patientDescription  String? @map("patient_description")
+    patientDescriptionBn String? @map("patient_description_bn")
+    operationalNotes    String? @map("operational_notes")
+    teamLeadUserId      Ref? @map("team_lead_user_id")
+    teamLead            identity.User? @relation("SessionTeamLead", fields: [teamLeadUserId], references: [id])
+    /// Frozen copy of staffing/equipment requirements at publish time (PRD §11.3).
+    requirementsSnapshot Json? @map("requirements_snapshot")
+    publishedAt         Instant? @map("published_at")
+    publishedById       Ref? @map("published_by_id")
+    publishedBy         identity.User? @relation("SessionPublishedBy", fields: [publishedById], references: [id])
+    publishOverrideReason String? @map("publish_override_reason")
+    publishOverrideById Ref? @map("publish_override_by_id")
+    publishOverrideBy   identity.User? @relation("SessionOverrideBy", fields: [publishOverrideById], references: [id])
+    startedAt           Instant? @map("started_at")
+    completedAt         Instant? @map("completed_at")
+    cancelledAt         Instant? @map("cancelled_at")
+    cancelledById       Ref? @map("cancelled_by_id")
+    cancelledBy         identity.User? @relation("SessionCancelledBy", fields: [cancelledById], references: [id])
+    cancelReason        String? @map("cancel_reason")
+    createdById         Ref @map("created_by_id")
+    createdBy           identity.User  @relation("SessionCreatedBy", fields: [createdById], references: [id])
+    /// Optimistic-concurrency version for capacity edits.
+    version             Int           @default(1)
+    +Timestamps
+
+    @@index([hubId, sessionDate])
+    @@index([status, sessionDate])
+    @@check(expression: sql`ends_at > starts_at`, name: "session_window")
+    @@check(expression: sql`appointment_capacity >= 0 AND walk_in_capacity >= 0 AND slot_minutes > 0 AND buffer_minutes >= 0`, name: "session_capacity_positive")
+    @@check(expression: sql`allow_overbooking OR booked_count <= appointment_capacity`, name: "session_no_overbooking")
+    @@check(expression: sql`walk_in_count <= walk_in_capacity OR allow_overbooking`, name: "session_walkin_capacity")
+    @@check(expression: sql`status <> 'cancelled' OR cancel_reason IS NOT NULL`, name: "session_cancel_reason")
+    @@map("hub_session")
+  }
+
+  /// Bookable time slots within a session.
+  model SessionSlot {
+    id          Id         @id
+    sessionId   Ref @map("session_id")
+    session     HubSession @relation(fields: [sessionId], references: [id])
+    startsAt    Instant @map("starts_at")
+    endsAt      Instant @map("ends_at")
+    capacity    Int
+    bookedCount Int        @default(0) @map("booked_count")
+    blocked     Boolean    @default(false)
+    version     Int        @default(1)
+
+    @@unique([sessionId, startsAt])
+    @@check(expression: sql`booked_count >= 0 AND booked_count <= capacity`, name: "slot_capacity")
+    @@check(expression: sql`ends_at > starts_at`, name: "slot_window")
+    @@map("session_slot")
+  }
+
+  model HubStation {
+    id          Id            @id
+    hubId       Ref @map("hub_id")
+    hub         Hub           @relation(fields: [hubId], references: [id])
+    code        String
+    name        String
+    nameBn      String? @map("name_bn")
+    stationType StationType @map("station_type")
+    status      StationStatus @default(available)
+    statusReason String? @map("status_reason")
+    sortOrder   Int           @default(0) @map("sort_order")
+    +Timestamps
+
+    @@unique([hubId, code])
+    @@map("hub_station")
+  }
+
+  model StationServiceType {
+    stationId     Ref @map("station_id")
+    station       HubStation  @relation(fields: [stationId], references: [id])
+    serviceTypeId Ref @map("service_type_id")
+    serviceType   ServiceType @relation(fields: [serviceTypeId], references: [id])
+
+    @@id([stationId, serviceTypeId])
+    @@map("station_service_type")
+  }
+
+  /// Roster: who works where/when, in which role (PRD §8.7).
+  /// sessionId null = standing hub shift.
+  model StaffShift {
+    id             Id           @id
+    userId         Ref @map("user_id")
+    user           identity.User @relation("ShiftUser", fields: [userId], references: [id])
+    hubId          Ref @map("hub_id")
+    hub            Hub          @relation(fields: [hubId], references: [id])
+    sessionId      Ref? @map("session_id")
+    session        HubSession?  @relation(fields: [sessionId], references: [id])
+    stationId      Ref? @map("station_id")
+    station        HubStation?  @relation(fields: [stationId], references: [id])
+    role           StaffRole
+    startsAt       Instant @map("starts_at")
+    endsAt         Instant @map("ends_at")
+    status         ShiftStatus  @default(proposed)
+    proposedById   Ref @map("proposed_by_id")
+    proposedBy     identity.User @relation("ShiftProposedBy", fields: [proposedById], references: [id])
+    approvedById   Ref? @map("approved_by_id")
+    approvedBy     identity.User? @relation("ShiftApprovedBy", fields: [approvedById], references: [id])
+    approvedAt     Instant? @map("approved_at")
+    /// Required when the shift overlaps another for the same user.
+    overlapOverrideReason String? @map("overlap_override_reason")
+    checkedInAt    Instant? @map("checked_in_at")
+    checkedOutAt   Instant? @map("checked_out_at")
+    +Timestamps
+
+    @@index([userId, startsAt])
+    @@index([sessionId])
+    @@index([hubId, startsAt])
+    @@check(expression: sql`ends_at > starts_at`, name: "shift_window")
+    @@map("staff_shift")
+  }
+
+  model Equipment {
+    id                  Id                @id
+    hubId               Ref @map("hub_id")
+    hub                 Hub               @relation(fields: [hubId], references: [id])
+    stationId           Ref? @map("station_id")
+    station             HubStation?       @relation(fields: [stationId], references: [id])
+    assetTag            String            @unique @map("asset_tag")
+    category            EquipmentCategory
+    make                String?
+    model               String?
+    serialNumber        String? @map("serial_number")
+    ownerName           String? @map("owner_name")
+    supportedObservationCodes String[] @map("supported_observation_codes")
+    supportedUnits      String[] @map("supported_units")
+    status              EquipmentStatus   @default(available)
+    statusReason        String? @map("status_reason")
+    purchasedOn         DateString? @map("purchased_on")
+    activatedOn         DateString? @map("activated_on")
+    lastInspectedAt     Instant? @map("last_inspected_at")
+    lastCalibratedAt    Instant? @map("last_calibrated_at")
+    nextCalibrationDue  DateString? @map("next_calibration_due")
+    serviceProvider     String? @map("service_provider")
+    notes               String?
+    retiredAt           Instant? @map("retired_at")
+    +Timestamps
+
+    @@index([hubId, status])
+    @@unique([category, serialNumber])
+    @@map("equipment")
+  }
+
+  /// Inspection / calibration / maintenance / fault history. Append-only.
+  model EquipmentEvent {
+    id            Id                 @id
+    equipmentId   Ref @map("equipment_id")
+    equipment     Equipment          @relation(fields: [equipmentId], references: [id])
+    kind          EquipmentEventKind
+    occurredAt    Instant @map("occurred_at")
+    statusFrom    EquipmentStatus? @map("status_from")
+    statusTo      EquipmentStatus? @map("status_to")
+    sessionId     Ref? @map("session_id")
+    session       HubSession?        @relation(fields: [sessionId], references: [id])
+    reportedById  Ref? @map("reported_by_id")
+    reportedBy    identity.User?     @relation(fields: [reportedById], references: [id])
+    serviceProvider String? @map("service_provider")
+    nextDueOn     DateString? @map("next_due_on")
+    notes         String?
+    createdAt     CreatedAt @map("created_at")
+
+    @@index([equipmentId, occurredAt])
+    @@map("equipment_event")
+  }
+
+  /// Equipment allocated to a session (mandatory items block publishing when
+  /// out of service — PRD §8.9).
+  model SessionEquipment {
+    id          Id          @id
+    sessionId   Ref @map("session_id")
+    session     HubSession  @relation(fields: [sessionId], references: [id])
+    equipmentId Ref @map("equipment_id")
+    equipment   Equipment   @relation(fields: [equipmentId], references: [id])
+    stationId   Ref? @map("station_id")
+    station     HubStation? @relation(fields: [stationId], references: [id])
+    mandatory   Boolean     @default(true)
+    createdAt   CreatedAt @map("created_at")
+
+    @@unique([sessionId, equipmentId])
+    @@map("session_equipment")
+  }
+
+  /// Booking against a hub session (PRD HubBooking / appointment).
+  /// Cancelled / no-show rows are retained, never deleted.
+  model Appointment {
+    id              Id                 @id
+    /// Short human code shown to the patient / encoded in QR.
+    code            String             @unique
+    patientId       Ref @map("patient_id")
+    patient         clinical.Patient   @relation(fields: [patientId], references: [id])
+    hubId           Ref @map("hub_id")
+    hub             Hub                @relation(fields: [hubId], references: [id])
+    sessionId       Ref @map("session_id")
+    session         HubSession         @relation(fields: [sessionId], references: [id])
+    slotId          Ref? @map("slot_id")
+    slot            SessionSlot?       @relation(fields: [slotId], references: [id])
+    serviceTypeId   Ref @map("service_type_id")
+    serviceType     ServiceType        @relation(fields: [serviceTypeId], references: [id])
+    source          BookingSource
+    hubAssignmentBasis HubAssignmentBasis @map("hub_assignment_basis")
+    isWalkIn        Boolean            @default(false) @map("is_walk_in")
+    isOutOfCatchment Boolean           @default(false) @map("is_out_of_catchment")
+    status          AppointmentStatus  @default(pending_confirmation)
+    bookedByUserId  Ref? @map("booked_by_user_id")
+    bookedBy        identity.User?     @relation("AppointmentBookedBy", fields: [bookedByUserId], references: [id])
+    /// Caregiver who booked on the patient's behalf, if any.
+    bookedByRepresentativeId Ref? @map("booked_by_representative_id")
+    bookedByRepresentative clinical.PatientRepresentative? @relation(fields: [bookedByRepresentativeId], references: [id])
+    referralNote    String? @map("referral_note")
+    confirmedAt     Instant? @map("confirmed_at")
+    arrivedAt       Instant? @map("arrived_at")
+    checkedInAt     Instant? @map("checked_in_at")
+    checkedInById   Ref? @map("checked_in_by_id")
+    checkedInBy     identity.User?     @relation("AppointmentCheckedInBy", fields: [checkedInById], references: [id])
+    completedAt     Instant? @map("completed_at")
+    cancelledAt     Instant? @map("cancelled_at")
+    cancelReason    String? @map("cancel_reason")
+    noShowAt        Instant? @map("no_show_at")
+    rescheduledFromId Ref? @map("rescheduled_from_id")
+    rescheduledFrom Appointment?       @relation("AppointmentReschedule", fields: [rescheduledFromId], references: [id])
+    idempotencyKey  String?            @unique @map("idempotency_key")
+    version         Int                @default(1)
+    +Timestamps
+
+    @@index([sessionId, status])
+    @@index([hubId, createdAt])
+    @@index([patientId, createdAt])
+    // One active booking per patient per session (PRD §20.2).
+    @@index([patientId, sessionId], unique: true, where: sql`(status NOT IN ('cancelled', 'no_show'))`, name: "appointment_one_active_per_session")
+    @@check(expression: sql`status <> 'cancelled' OR cancel_reason IS NOT NULL`, name: "appointment_cancel_reason")
+    @@map("appointment")
+  }
+
+  model WaitlistEntry {
+    id          Id             @id
+    sessionId   Ref @map("session_id")
+    session     HubSession     @relation(fields: [sessionId], references: [id])
+    patientId   Ref @map("patient_id")
+    patient     clinical.Patient @relation(fields: [patientId], references: [id])
+    position    Int
+    status      WaitlistStatus @default(waiting)
+    appointmentId Ref? @map("appointment_id")
+    appointment Appointment?   @relation(fields: [appointmentId], references: [id])
+    addedById   Ref? @map("added_by_id")
+    addedBy     identity.User? @relation(fields: [addedById], references: [id])
+    +Timestamps
+
+    @@unique([sessionId, position])
+    @@index([sessionId, patientId], unique: true, where: sql`(status = 'waiting')`, name: "waitlist_one_active")
+    @@map("waitlist_entry")
+  }
+
+  /// Approved queue-priority policy; receptionists cannot invent triage
+  /// (PRD §8.8, rule 14).
+  model QueuePriorityPolicy {
+    id           Id       @id
+    code         String
+    version      Int
+    description  String
+    priorityLevel Int @map("priority_level")
+    approvedById Ref @map("approved_by_id")
+    approvedBy   identity.User @relation(fields: [approvedById], references: [id])
+    approvedAt   Instant @map("approved_at")
+    status       RecordStatus @default(active)
+
+    @@unique([code, version])
+    @@map("queue_priority_policy")
+  }
+
+  /// Queue token for a checked-in encounter. Display boards show only
+  /// displayCode / station / wait time — never names or readings (PRD §14.2).
+  model QueueTicket {
+    id               Id           @id
+    encounterId      Ref          @unique @map("encounter_id")
+    encounter        clinical.Encounter @relation(fields: [encounterId], references: [id])
+    appointmentId    Ref          @unique @map("appointment_id")
+    appointment      Appointment  @relation(fields: [appointmentId], references: [id])
+    hubId            Ref @map("hub_id")
+    hub              Hub          @relation(fields: [hubId], references: [id])
+    sessionId        Ref @map("session_id")
+    session          HubSession   @relation(fields: [sessionId], references: [id])
+    ticketNumber     Int @map("ticket_number")
+    displayCode      String @map("display_code")
+    currentStationId Ref? @map("current_station_id")
+    currentStation   HubStation?  @relation(fields: [currentStationId], references: [id])
+    priorityPolicyId Ref? @map("priority_policy_id")
+    priorityPolicy   QueuePriorityPolicy? @relation(fields: [priorityPolicyId], references: [id])
+    priorityLevel    Int          @default(0) @map("priority_level")
+    status           QueueStatus  @default(waiting)
+    delayReason      DelayReason? @map("delay_reason")
+    issuedAt         Instant @map("issued_at")
+    calledAt         Instant? @map("called_at")
+    serviceStartedAt Instant? @map("service_started_at")
+    completedAt      Instant? @map("completed_at")
+    version          Int          @default(1)
+    +Timestamps
+
+    @@unique([sessionId, ticketNumber])
+    @@index([sessionId, status, priorityLevel])
+    @@map("queue_ticket")
+  }
+
+  /// Every queue state transition, for wait-time metrics and audit.
+  model QueueTicketEvent {
+    id         Id           @id
+    ticketId   Ref @map("ticket_id")
+    ticket     QueueTicket  @relation(fields: [ticketId], references: [id])
+    fromStatus QueueStatus? @map("from_status")
+    toStatus   QueueStatus @map("to_status")
+    fromStationId Ref? @map("from_station_id")
+    toStationId Ref? @map("to_station_id")
+    toStation  HubStation?  @relation(fields: [toStationId], references: [id])
+    actorUserId Ref? @map("actor_user_id")
+    actor      identity.User? @relation(fields: [actorUserId], references: [id])
+    reason     String?
+    occurredAt Instant @map("occurred_at")
+
+    @@index([ticketId, occurredAt])
+    @@map("queue_ticket_event")
+  }
+
+  /// Operational exception queue (PRD §8.10). Patient-level detail is fetched
+  /// through the authorised encounter API, not stored here.
+  model OperationalException {
+    id            Id              @id
+    hubId         Ref @map("hub_id")
+    hub           Hub             @relation(fields: [hubId], references: [id])
+    sessionId     Ref? @map("session_id")
+    session       HubSession?     @relation(fields: [sessionId], references: [id])
+    encounterId   Ref? @map("encounter_id")
+    encounter     clinical.Encounter? @relation(fields: [encounterId], references: [id])
+    equipmentId   Ref? @map("equipment_id")
+    equipment     Equipment?      @relation(fields: [equipmentId], references: [id])
+    syncSubmissionId Ref? @map("sync_submission_id")
+    syncSubmission ops.SyncSubmission? @relation(fields: [syncSubmissionId], references: [id])
+    type          ExceptionType
+    severity      Severity        @default(medium)
+    status        ExceptionStatus @default(open)
+    /// Non-sensitive, human-readable summary.
+    summary       String
+    /// Prevents duplicate open exceptions for the same underlying cause.
+    dedupeKey     String @map("dedupe_key")
+    raisedAt      Instant @map("raised_at")
+    assignedToId  Ref? @map("assigned_to_id")
+    assignedTo    identity.User?  @relation("ExceptionAssignee", fields: [assignedToId], references: [id])
+    escalatedAt   Instant? @map("escalated_at")
+    escalatedTo   String? @map("escalated_to")
+    resolvedAt    Instant? @map("resolved_at")
+    resolvedById  Ref? @map("resolved_by_id")
+    resolvedBy    identity.User?  @relation("ExceptionResolver", fields: [resolvedById], references: [id])
+    resolutionNote String? @map("resolution_note")
+    +Timestamps
+
+    @@index([hubId, status, type])
+    @@index([dedupeKey], unique: true, where: sql`(status IN ('open', 'acknowledged', 'escalated'))`, name: "exception_open_dedupe")
+    @@map("operational_exception")
+  }
+}
+
+// =============================================================================
+// clinical — shared clinical entities (PRD §11.2). Hub website roles get NO
+// direct grants on this schema; access goes through authorised APIs only.
+// =============================================================================
+
+namespace clinical {
+
+  /// Canonical Healora patient (PRD §5.2 rule 1). Phone is NOT a key —
+  /// families share phones.
+  model Patient {
+    id              Id            @id
+    /// Human-readable Healora patient code (printed on card / QR).
+    healoraCode     String        @unique @map("healora_code")
+    fullName        String @map("full_name")
+    fullNameBn      String? @map("full_name_bn")
+    dateOfBirth     DateString? @map("date_of_birth")
+    /// Set when only an approximate age is known.
+    birthYearEstimated Int? @map("birth_year_estimated")
+    sex             Sex           @default(unknown)
+    phone           String?
+    phoneVerifiedAt Instant? @map("phone_verified_at")
+    preferredLanguage String      @default("bn") @map("preferred_language")
+    addressLine     String? @map("address_line")
+    regionId        Ref? @map("region_id")
+    region          hub.Region?   @relation(fields: [regionId], references: [id])
+    preferredHubId  Ref? @map("preferred_hub_id")
+    preferredHub    hub.Hub?      @relation(fields: [preferredHubId], references: [id])
+    preferredHubBasis HubAssignmentBasis? @map("preferred_hub_basis")
+    /// Link to the patient-app account in the central identity service.
+    appAccountId    String?       @unique @map("app_account_id")
+    status          PatientStatus @default(active)
+    mergedIntoId    Ref? @map("merged_into_id")
+    mergedInto      Patient?      @relation("PatientMergedInto", fields: [mergedIntoId], references: [id])
+    registeredAtHubId Ref? @map("registered_at_hub_id")
+    registeredById  Ref? @map("registered_by_id")
+    registeredBy    identity.User? @relation(fields: [registeredById], references: [id])
+    +Timestamps
+
+    @@index([phone])
+    @@index([regionId])
+    @@check(expression: sql`status <> 'merged' OR merged_into_id IS NOT NULL`, name: "patient_merge_target")
+    @@map("patient")
+  }
+
+  /// Secondary identifiers. Values are stored as a keyed hash plus last
+  /// 4 characters for display — never the raw national ID.
+  model PatientIdentifier {
+    id         Id                    @id
+    patientId  Ref @map("patient_id")
+    patient    Patient               @relation(fields: [patientId], references: [id])
+    type       PatientIdentifierType
+    valueHash  String @map("value_hash")
+    valueLast4 String? @map("value_last4")
+    verifiedById Ref? @map("verified_by_id")
+    verifiedAt Instant? @map("verified_at")
+    createdAt  CreatedAt @map("created_at")
+
+    @@unique([type, valueHash])
+    @@index([patientId])
+    @@map("patient_identifier")
+  }
+
+  /// Potential duplicate flagged for authorised resolution (PRD §8.8).
+  model PatientDuplicateCandidate {
+    id            Id              @id
+    patientAId    Ref @map("patient_a_id")
+    patientA      Patient         @relation("DuplicateA", fields: [patientAId], references: [id])
+    patientBId    Ref @map("patient_b_id")
+    patientB      Patient         @relation("DuplicateB", fields: [patientBId], references: [id])
+    matchReason   String @map("match_reason")
+    detectedById  Ref? @map("detected_by_id")
+    detectedBy    identity.User?  @relation("DuplicateDetectedBy", fields: [detectedById], references: [id])
+    status        DuplicateStatus @default(open)
+    resolvedById  Ref? @map("resolved_by_id")
+    resolvedBy    identity.User?  @relation("DuplicateResolvedBy", fields: [resolvedById], references: [id])
+    resolvedAt    Instant? @map("resolved_at")
+    resolutionNote String? @map("resolution_note")
+    createdAt     CreatedAt @map("created_at")
+
+    @@index([patientAId, patientBId], unique: true, name: "patient_duplicate_pair")
+    @@check(expression: sql`patient_a_id < patient_b_id`, name: "duplicate_ordered_pair")
+    @@map("patient_duplicate_candidate")
+  }
+
+  /// Audited platform-level identity merge.
+  model PatientMerge {
+    id                Id      @id
+    survivorPatientId Ref @map("survivor_patient_id")
+    survivor          Patient @relation("MergeSurvivor", fields: [survivorPatientId], references: [id])
+    mergedPatientId   Ref     @unique @map("merged_patient_id")
+    merged            Patient @relation("MergeMerged", fields: [mergedPatientId], references: [id])
+    duplicateCandidateId Ref? @map("duplicate_candidate_id")
+    duplicateCandidate PatientDuplicateCandidate? @relation(fields: [duplicateCandidateId], references: [id])
+    reason            String
+    performedById     Ref @map("performed_by_id")
+    performedBy       identity.User @relation(fields: [performedById], references: [id])
+    performedAt       Instant @map("performed_at")
+
+    @@map("patient_merge")
+  }
+
+  /// Caregiver / guardian / authorised representative (PRD §6.3, §9.5).
+  model PatientRepresentative {
+    id               Id                         @id
+    patientId        Ref @map("patient_id")
+    patient          Patient                    @relation("RepresentativeOf", fields: [patientId], references: [id])
+    /// If the representative is also a Healora patient.
+    representativePatientId Ref? @map("representative_patient_id")
+    representativePatient Patient?              @relation("RepresentativeIsPatient", fields: [representativePatientId], references: [id])
+    fullName         String @map("full_name")
+    phone            String?
+    relationship     RepresentativeRelationship
+    legalBasis       String @map("legal_basis")
+    identityEvidence String? @map("identity_evidence")
+    validFrom        Instant @map("valid_from")
+    validTo          Instant? @map("valid_to")
+    verifiedById     Ref? @map("verified_by_id")
+    verifiedBy       identity.User?             @relation(fields: [verifiedById], references: [id])
+    verifiedAt       Instant? @map("verified_at")
+    revokedAt        Instant? @map("revoked_at")
+    +Timestamps
+
+    @@index([patientId])
+    @@map("patient_representative")
+  }
+
+  /// Versioned consent wording, per purpose and language (PRD §16.3).
+  model ConsentTemplate {
+    id            Id             @id
+    code          String
+    version       Int
+    purpose       ConsentPurpose
+    language      String
+    title         String
+    body          String
+    /// Script for verbal explanation to patients who cannot read.
+    verbalScript  String? @map("verbal_script")
+    dataCategories String[] @map("data_categories")
+    recipients    String[]
+    status        ProtocolStatus @default(draft)
+    approvedById  Ref? @map("approved_by_id")
+    approvedBy    identity.User? @relation(fields: [approvedById], references: [id])
+    effectiveFrom Instant? @map("effective_from")
+    effectiveTo   Instant? @map("effective_to")
+    createdAt     CreatedAt @map("created_at")
+
+    @@unique([code, version, language])
+    @@map("consent_template")
+  }
+
+  /// One consent / authorisation record. Purposes are separate rows — hub
+  /// service consent ≠ teleconsult ≠ overseas sharing (PRD §9.5).
+  model Consent {
+    id               Id             @id
+    patientId        Ref @map("patient_id")
+    patient          Patient        @relation(fields: [patientId], references: [id])
+    representativeId Ref? @map("representative_id")
+    representative   PatientRepresentative? @relation(fields: [representativeId], references: [id])
+    templateId       Ref @map("template_id")
+    template         ConsentTemplate @relation(fields: [templateId], references: [id])
+    purpose          ConsentPurpose
+    dataCategories   String[] @map("data_categories")
+    recipients       String[]
+    language         String
+    method           ConsentMethod
+    capturedById     Ref? @map("captured_by_id")
+    capturedBy       identity.User? @relation("ConsentCapturedBy", fields: [capturedById], references: [id])
+    capturedAt       Instant @map("captured_at")
+    capturedAtHubId  Ref? @map("captured_at_hub_id")
+    capturedAtHub    hub.Hub?       @relation(fields: [capturedAtHubId], references: [id])
+    witnessName      String? @map("witness_name")
+    evidenceRef      String? @map("evidence_ref")
+    status           ConsentStatus  @default(granted)
+    expiresAt        Instant? @map("expires_at")
+    withdrawnAt      Instant? @map("withdrawn_at")
+    withdrawnReason  String? @map("withdrawn_reason")
+    withdrawnRecordedById Ref? @map("withdrawn_recorded_by_id")
+    withdrawnRecordedBy identity.User? @relation("ConsentWithdrawnBy", fields: [withdrawnRecordedById], references: [id])
+    createdAt        CreatedAt @map("created_at")
+
+    @@index([patientId, purpose, status])
+    @@check(expression: sql`status <> 'withdrawn' OR withdrawn_at IS NOT NULL`, name: "consent_withdrawn_at")
+    @@map("consent")
+  }
+
+  /// Versioned clinical protocol owned by a named clinical lead (PRD §13.1).
+  model ClinicalProtocol {
+    id                Id             @id
+    code              String
+    version           Int
+    name              String
+    description       String?
+    clinicalOwnerId   Ref @map("clinical_owner_id")
+    clinicalOwner     identity.User  @relation("ProtocolOwner", fields: [clinicalOwnerId], references: [id])
+    status            ProtocolStatus @default(draft)
+    approvedById      Ref? @map("approved_by_id")
+    approvedBy        identity.User? @relation("ProtocolApprovedBy", fields: [approvedById], references: [id])
+    approvedAt        Instant? @map("approved_at")
+    effectiveFrom     Instant? @map("effective_from")
+    effectiveTo       Instant? @map("effective_to")
+    documentRef       String? @map("document_ref")
+    guidelineReference String? @map("guideline_reference")
+    +Timestamps
+
+    @@unique([code, version])
+    @@map("clinical_protocol")
+  }
+
+  /// Observation catalogue with language-independent codes (PRD §14.3).
+  /// plausibleMin/Max are input-format guards only, NOT clinical thresholds.
+  model ObservationDefinition {
+    id            Id                   @id
+    code          String               @unique
+    /// Optional mapping to LOINC / SNOMED for future exchange.
+    externalSystem String? @map("external_system")
+    externalCode  String? @map("external_code")
+    name          String
+    nameBn        String? @map("name_bn")
+    valueType     ObservationValueType @map("value_type")
+    canonicalUnit String? @map("canonical_unit")
+    allowedUnits  String[] @map("allowed_units")
+    plausibleMin  Numeric(12, 4)? @map("plausible_min")
+    plausibleMax  Numeric(12, 4)? @map("plausible_max")
+    /// Allowed context values, e.g. fasting / random / post_meal for glucose.
+    allowedContexts String[] @map("allowed_contexts")
+    allowedMethods  String[] @map("allowed_methods")
+    allowedSites    String[] @map("allowed_sites")
+    isDerived     Boolean              @default(false) @map("is_derived")
+    status        RecordStatus         @default(active)
+    +Timestamps
+
+    @@map("observation_definition")
+  }
+
+  /// What a protocol requires to be captured, and by whom.
+  model ProtocolObservation {
+    id               Id               @id
+    protocolId       Ref @map("protocol_id")
+    protocol         ClinicalProtocol @relation(fields: [protocolId], references: [id])
+    observationCode  String @map("observation_code")
+    definition       ObservationDefinition @relation(fields: [observationCode], references: [code])
+    required         Boolean          @default(true)
+    permittedRoles   StaffRole[] @map("permitted_roles")
+    /// Repeat rules as defined by the protocol (count, interval, trigger).
+    repeatRule       Json? @map("repeat_rule")
+    sortOrder        Int              @default(0) @map("sort_order")
+
+    @@unique([protocolId, observationCode])
+    @@map("protocol_observation")
+  }
+
+  /// Approved, version-controlled alert thresholds (PRD §13.2). A flag is a
+  /// prompt for human review, never a diagnosis.
+  model ProtocolAlertRule {
+    id              Id               @id
+    protocolId      Ref @map("protocol_id")
+    protocol        ClinicalProtocol @relation(fields: [protocolId], references: [id])
+    code            String
+    observationCode String @map("observation_code")
+    definition      ObservationDefinition @relation(fields: [observationCode], references: [code])
+    /// Structured rule, e.g. {"op":">=","value":180,"unit":"mmHg","context":null}
+    condition       Json
+    action          AlertAction
+    severity        Severity
+    messageEn       String @map("message_en")
+    messageBn       String? @map("message_bn")
+
+    @@unique([protocolId, code])
+    @@map("protocol_alert_rule")
+  }
+
+  /// A patient's care interaction (PRD §2.1, §11.2).
+  model Encounter {
+    id                   Id                    @id
+    patientId            Ref @map("patient_id")
+    patient              Patient               @relation(fields: [patientId], references: [id])
+    encounterType        EncounterType         @default(hub_visit) @map("encounter_type")
+    hubId                Ref? @map("hub_id")
+    hub                  hub.Hub?              @relation(fields: [hubId], references: [id])
+    sessionId            Ref? @map("session_id")
+    session              hub.HubSession?       @relation(fields: [sessionId], references: [id])
+    appointmentId        Ref?                  @unique @map("appointment_id")
+    appointment          hub.Appointment?      @relation(fields: [appointmentId], references: [id])
+    serviceTypeId        Ref? @map("service_type_id")
+    serviceType          hub.ServiceType?      @relation(fields: [serviceTypeId], references: [id])
+    protocolId           Ref? @map("protocol_id")
+    protocol             ClinicalProtocol?     @relation(fields: [protocolId], references: [id])
+    status               EncounterStatus       @default(created)
+    disposition          EncounterDisposition?
+    identityMatchStatus  IdentityMatchStatus   @default(unresolved) @map("identity_match_status")
+    identityConfirmedById Ref? @map("identity_confirmed_by_id")
+    identityConfirmedBy  identity.User?        @relation("EncounterIdentityConfirmedBy", fields: [identityConfirmedById], references: [id])
+    identityConfirmedAt  Instant? @map("identity_confirmed_at")
+    /// Reason for a hub walk-in encounter without a session (PRD §11.3).
+    noSessionReason      String? @map("no_session_reason")
+    requiresDoctorReview Boolean               @default(false) @map("requires_doctor_review")
+    openedAt             Instant @map("opened_at")
+    submittedAt          Instant? @map("submitted_at")
+    reviewedAt           Instant? @map("reviewed_at")
+    closedAt             Instant? @map("closed_at")
+    closedById           Ref? @map("closed_by_id")
+    closedBy             identity.User?        @relation("EncounterClosedBy", fields: [closedById], references: [id])
+    version              Int                   @default(1)
+    +Timestamps
+
+    @@index([patientId, openedAt])
+    @@index([hubId, status])
+    @@index([sessionId, status])
+    @@check(expression: sql`encounter_type <> 'hub_visit' OR (hub_id IS NOT NULL AND (session_id IS NOT NULL OR no_session_reason IS NOT NULL))`, name: "encounter_hub_context")
+    @@check(expression: sql`status IN ('created', 'unable_to_complete') OR identity_match_status = 'confirmed'`, name: "encounter_identity_confirmed")
+    @@map("encounter")
+  }
+
+  /// Consents relied upon for an encounter.
+  model EncounterConsent {
+    encounterId Ref @map("encounter_id")
+    encounter   Encounter @relation(fields: [encounterId], references: [id])
+    consentId   Ref @map("consent_id")
+    consent     Consent   @relation(fields: [consentId], references: [id])
+    createdAt   CreatedAt @map("created_at")
+
+    @@id([encounterId, consentId])
+    @@map("encounter_consent")
+  }
+
+  /// Team assignment for an encounter (team_assignment_id in PRD §10.2).
+  /// Transfers close the old row and open a new one.
+  model EncounterAssignment {
+    id           Id                   @id
+    encounterId  Ref @map("encounter_id")
+    encounter    Encounter            @relation(fields: [encounterId], references: [id])
+    userId       Ref @map("user_id")
+    user         identity.User        @relation("AssignmentUser", fields: [userId], references: [id])
+    role         StaffRole
+    stationId    Ref? @map("station_id")
+    station      hub.HubStation?      @relation(fields: [stationId], references: [id])
+    status       TeamAssignmentStatus @default(assigned)
+    assignedById Ref @map("assigned_by_id")
+    assignedBy   identity.User        @relation("AssignmentAssignedBy", fields: [assignedById], references: [id])
+    assignedAt   Instant @map("assigned_at")
+    acceptedAt   Instant? @map("accepted_at")
+    startedAt    Instant? @map("started_at")
+    endedAt      Instant? @map("ended_at")
+    transferredToId Ref? @map("transferred_to_id")
+    transferredTo EncounterAssignment? @relation("AssignmentTransfer", fields: [transferredToId], references: [id])
+    reason       String?
+    handoverNote String? @map("handover_note")
+
+    @@index([userId, status])
+    @@index([encounterId])
+    @@map("encounter_assignment")
+  }
+
+  /// Per-encounter checklist derived from the protocol; drives completeness
+  /// checks. A missing value is a `missing` task with a reason — never zero.
+  model EncounterTask {
+    id              Id            @id
+    encounterId     Ref @map("encounter_id")
+    encounter       Encounter     @relation(fields: [encounterId], references: [id])
+    observationCode String @map("observation_code")
+    definition      ObservationDefinition @relation(fields: [observationCode], references: [code])
+    required        Boolean
+    status          TaskStatus    @default(pending)
+    missingReason   MissingReason? @map("missing_reason")
+    missingNote     String? @map("missing_note")
+    completedById   Ref? @map("completed_by_id")
+    completedBy     identity.User? @relation(fields: [completedById], references: [id])
+    completedAt     Instant? @map("completed_at")
+    +Timestamps
+
+    @@unique([encounterId, observationCode])
+    @@check(expression: sql`status <> 'missing' OR missing_reason IS NOT NULL`, name: "task_missing_reason")
+    @@map("encounter_task")
+  }
+
+  /// A single structured measurement (PRD §9.6, §11.2). Append-only:
+  /// a correction is a new row with supersedesId set; the old row becomes
+  /// `superseded`. Components of one reading (systolic + diastolic) share
+  /// readingGroupId. The id may be generated on the device (stable offline id).
+  model Observation {
+    id                Id                @id
+    encounterId       Ref @map("encounter_id")
+    encounter         Encounter         @relation(fields: [encounterId], references: [id])
+    patientId         Ref @map("patient_id")
+    patient           Patient           @relation(fields: [patientId], references: [id])
+    observationCode   String @map("observation_code")
+    definition        ObservationDefinition @relation(fields: [observationCode], references: [code])
+    readingGroupId    Ref? @map("reading_group_id")
+    valueNumeric      Numeric(12, 4)? @map("value_numeric")
+    valueCode         String? @map("value_code")
+    valueText         String? @map("value_text")
+    unit              String?
+    method            String?
+    bodySite          String? @map("body_site")
+    posture           String?
+    /// e.g. fasting / random / post_meal — required for glucose (PRD §9.6).
+    context           String?
+    measuredAt        Instant @map("measured_at")
+    /// Device clock vs server clock kept separately (PRD §10.6).
+    clientRecordedAt  Instant @map("client_recorded_at")
+    serverReceivedAt  Instant @map("server_received_at")
+    performerUserId   Ref @map("performer_user_id")
+    performer         identity.User     @relation("ObservationPerformer", fields: [performerUserId], references: [id])
+    performerRole     StaffRole @map("performer_role")
+    performerCredentialId Ref? @map("performer_credential_id")
+    performerCredential identity.StaffCredential? @relation(fields: [performerCredentialId], references: [id])
+    sourceType        ObservationSource @map("source_type")
+    hubId             Ref? @map("hub_id")
+    hub               hub.Hub?          @relation(fields: [hubId], references: [id])
+    sessionId         Ref? @map("session_id")
+    session           hub.HubSession?   @relation(fields: [sessionId], references: [id])
+    equipmentId       Ref? @map("equipment_id")
+    equipment         hub.Equipment?    @relation(fields: [equipmentId], references: [id])
+    deviceAttributionMissingReason String? @map("device_attribution_missing_reason")
+    /// Repeat measurement chain — both readings kept (PRD §9.6 step 5).
+    repeatOfId        Ref? @map("repeat_of_id")
+    repeatOf          Observation?      @relation("ObservationRepeat", fields: [repeatOfId], references: [id])
+    repeatReason      String? @map("repeat_reason")
+    /// Correction / amendment chain (PRD §9.9 step 7).
+    supersedesId      Ref?              @unique @map("supersedes_id")
+    supersedes        Observation?      @relation("ObservationCorrection", fields: [supersedesId], references: [id])
+    correctionReason  String? @map("correction_reason")
+    isDerived         Boolean           @default(false) @map("is_derived")
+    derivationRule    String? @map("derivation_rule")
+    derivationRuleVersion Int? @map("derivation_rule_version")
+    status            ObservationStatus @default(final)
+    validationStatus  ValidationStatus  @default(valid) @map("validation_status")
+    reviewStatus      ReviewStatus      @default(not_required) @map("review_status")
+    protocolId        Ref? @map("protocol_id")
+    protocol          ClinicalProtocol? @relation(fields: [protocolId], references: [id])
+    idempotencyKey    String            @unique @map("idempotency_key")
+    factualNote       String? @map("factual_note")
+    createdAt         CreatedAt @map("created_at")
+
+    @@index([patientId, observationCode, measuredAt], name: "observation_patient_timeline")
+    @@index([encounterId])
+    @@index([readingGroupId])
+    @@check(expression: sql`num_nonnulls(value_numeric, value_code, value_text) = 1`, name: "observation_single_value")
+    @@check(expression: sql`value_numeric IS NULL OR unit IS NOT NULL`, name: "observation_numeric_unit")
+    @@check(expression: sql`supersedes_id IS NULL OR correction_reason IS NOT NULL`, name: "observation_correction_reason")
+    @@check(expression: sql`repeat_of_id IS NULL OR repeat_reason IS NOT NULL`, name: "observation_repeat_reason")
+    @@check(expression: sql`NOT is_derived OR derivation_rule IS NOT NULL`, name: "observation_derived_rule")
+    @@check(expression: sql`source_type <> 'hub_visit' OR hub_id IS NOT NULL`, name: "observation_hub_source")
+    @@map("observation")
+  }
+
+  /// Source observations used for a derived value (e.g. BMI ← height, weight).
+  model ObservationDerivation {
+    derivedId Ref @map("derived_id")
+    derived   Observation @relation("DerivedValue", fields: [derivedId], references: [id])
+    sourceId  Ref @map("source_id")
+    source    Observation @relation("DerivationSource", fields: [sourceId], references: [id])
+
+    @@id([derivedId, sourceId])
+    @@map("observation_derivation")
+  }
+
+  /// Alert raised by an approved protocol rule; resolved only by the
+  /// authorised clinical workflow (PRD §8.10 "not allowed", rule 15).
+  model ObservationAlert {
+    id            Id            @id
+    observationId Ref @map("observation_id")
+    observation   Observation   @relation(fields: [observationId], references: [id])
+    encounterId   Ref @map("encounter_id")
+    encounter     Encounter     @relation(fields: [encounterId], references: [id])
+    alertRuleId   Ref @map("alert_rule_id")
+    alertRule     ProtocolAlertRule @relation(fields: [alertRuleId], references: [id])
+    action        AlertAction
+    severity      Severity
+    status        AlertStatus   @default(open)
+    acknowledgedById Ref? @map("acknowledged_by_id")
+    acknowledgedBy identity.User? @relation("AlertAcknowledgedBy", fields: [acknowledgedById], references: [id])
+    acknowledgedAt Instant? @map("acknowledged_at")
+    resolvedById  Ref? @map("resolved_by_id")
+    resolvedBy    identity.User? @relation("AlertResolvedBy", fields: [resolvedById], references: [id])
+    resolvedAt    Instant? @map("resolved_at")
+    resolutionNote String? @map("resolution_note")
+    createdAt     CreatedAt @map("created_at")
+
+    @@index([encounterId, status])
+    @@map("observation_alert")
+  }
+
+  /// Doctor's request for a repeat / additional measurement.
+  model RemeasurementRequest {
+    id               Id            @id
+    encounterId      Ref @map("encounter_id")
+    encounter        Encounter     @relation(fields: [encounterId], references: [id])
+    observationCode  String @map("observation_code")
+    definition       ObservationDefinition @relation(fields: [observationCode], references: [code])
+    priorObservationId Ref? @map("prior_observation_id")
+    priorObservation Observation?  @relation("RemeasurePrior", fields: [priorObservationId], references: [id])
+    reason           String
+    requestedById    Ref @map("requested_by_id")
+    requestedBy      identity.User @relation(fields: [requestedById], references: [id])
+    requestedAt      Instant @map("requested_at")
+    status           RequestStatus @default(open)
+    fulfilledByObservationId Ref? @map("fulfilled_by_observation_id")
+    fulfilledByObservation Observation? @relation("RemeasureFulfilled", fields: [fulfilledByObservationId], references: [id])
+    fulfilledAt      Instant? @map("fulfilled_at")
+
+    @@index([encounterId, status])
+    @@map("remeasurement_request")
+  }
+
+  /// Clinician review of an encounter (PRD §9.7). Doctor-only: reviewer
+  /// must hold a verified credential.
+  model ClinicalReview {
+    id             Id             @id
+    encounterId    Ref @map("encounter_id")
+    encounter      Encounter      @relation(fields: [encounterId], references: [id])
+    reviewerId     Ref @map("reviewer_id")
+    reviewer       identity.User  @relation(fields: [reviewerId], references: [id])
+    reviewerRole   StaffRole @map("reviewer_role")
+    credentialId   Ref @map("credential_id")
+    credential     identity.StaffCredential @relation(fields: [credentialId], references: [id])
+    decision       ReviewDecision
+    summary        String?
+    signedAt       Instant @map("signed_at")
+    supersedesId   Ref?           @unique @map("supersedes_id")
+    supersedes     ClinicalReview? @relation("ReviewAmendment", fields: [supersedesId], references: [id])
+    amendmentReason String? @map("amendment_reason")
+    createdAt      CreatedAt @map("created_at")
+
+    @@index([encounterId])
+    @@check(expression: sql`supersedes_id IS NULL OR amendment_reason IS NOT NULL`, name: "review_amendment_reason")
+    @@map("clinical_review")
+  }
+
+  /// Factual worker notes and clinician notes/instructions. patientVisible
+  /// instructions are shown separately from raw measurements (PRD §9.8).
+  model ClinicalNote {
+    id            Id           @id
+    encounterId   Ref @map("encounter_id")
+    encounter     Encounter    @relation(fields: [encounterId], references: [id])
+    authorId      Ref @map("author_id")
+    author        identity.User @relation(fields: [authorId], references: [id])
+    authorRole    StaffRole @map("author_role")
+    credentialId  Ref? @map("credential_id")
+    credential    identity.StaffCredential? @relation(fields: [credentialId], references: [id])
+    noteType      NoteType @map("note_type")
+    content       String
+    language      String       @default("bn")
+    patientVisible Boolean     @default(false) @map("patient_visible")
+    signedAt      Instant? @map("signed_at")
+    amendsId      Ref?         @unique @map("amends_id")
+    amends        ClinicalNote? @relation("NoteAmendment", fields: [amendsId], references: [id])
+    amendmentReason String? @map("amendment_reason")
+    idempotencyKey String?     @unique @map("idempotency_key")
+    createdAt     CreatedAt @map("created_at")
+
+    @@index([encounterId])
+    @@check(expression: sql`note_type NOT IN ('clinical_assessment', 'follow_up_instruction') OR credential_id IS NOT NULL`, name: "note_clinical_credential")
+    @@check(expression: sql`amends_id IS NULL OR amendment_reason IS NOT NULL`, name: "note_amendment_reason")
+    @@map("clinical_note")
+  }
+
+  /// Emergency / urgent / referral / operational escalation (PRD §13.3).
+  /// Recording it must never block care.
+  model EncounterEscalation {
+    id               Id             @id
+    encounterId      Ref @map("encounter_id")
+    encounter        Encounter      @relation(fields: [encounterId], references: [id])
+    type             EscalationType
+    raisedById       Ref @map("raised_by_id")
+    raisedBy         identity.User  @relation("EscalationRaisedBy", fields: [raisedById], references: [id])
+    raisedAt         Instant @map("raised_at")
+    contactedName    String? @map("contacted_name")
+    referralFacility String? @map("referral_facility")
+    transportArranged Boolean       @default(false) @map("transport_arranged")
+    notes            String?
+    handoverAt       Instant? @map("handover_at")
+    handoverNote     String? @map("handover_note")
+    closedAt         Instant? @map("closed_at")
+    closedById       Ref? @map("closed_by_id")
+    closedBy         identity.User? @relation("EscalationClosedBy", fields: [closedById], references: [id])
+    createdAt        CreatedAt @map("created_at")
+
+    @@index([encounterId])
+    @@index([type, raisedAt])
+    @@map("encounter_escalation")
+  }
+}
+
+// =============================================================================
+// ops — audit, events, sync, notifications, exports
+// =============================================================================
+
+namespace ops {
+
+  /// Append-only audit log (PRD §16.2). No FKs, so it survives any upstream
+  /// change; protect with a trigger / REVOKE UPDATE, DELETE in a migration.
+  model AuditEvent {
+    id            Id            @id
+    occurredAt    Instant @map("occurred_at")
+    actorUserId   Ref? @map("actor_user_id")
+    actorRole     StaffRole? @map("actor_role")
+    scopeRegionId Ref? @map("scope_region_id")
+    scopeHubId    Ref? @map("scope_hub_id")
+    action        String
+    targetType    String @map("target_type")
+    targetId      Ref? @map("target_id")
+    patientId     Ref? @map("patient_id")
+    reason        String?
+    outcome       AuditOutcome
+    priority      AuditPriority @default(normal)
+    sourceIp      String? @map("source_ip")
+    userAgent     String? @map("user_agent")
+    deviceInstallationId Ref? @map("device_installation_id")
+    authSessionId String? @map("auth_session_id")
+    correlationId String? @map("correlation_id")
+    /// Non-sensitive metadata only — no raw clinical values.
+    metadata      Json?
+
+    @@index([actorUserId, occurredAt])
+    @@index([targetType, targetId])
+    @@index([patientId, occurredAt])
+    @@index([scopeHubId, occurredAt])
+    @@index([priority, occurredAt], where: sql`(priority = 'high')`, name: "audit_high_priority")
+    @@map("audit_event")
+  }
+
+  /// Transactional outbox for domain events (PRD §10.4). Payload carries IDs
+  /// only — never raw health values.
+  model DomainEvent {
+    id            Id       @id
+    eventType     String @map("event_type")
+    schemaVersion Int      @default(1) @map("schema_version")
+    occurredAt    Instant @map("occurred_at")
+    aggregateType String @map("aggregate_type")
+    aggregateId   Ref @map("aggregate_id")
+    hubId         Ref? @map("hub_id")
+    sessionId     Ref? @map("session_id")
+    correlationId String? @map("correlation_id")
+    causationId   Ref? @map("causation_id")
+    payload       Json
+    publishedAt   Instant? @map("published_at")
+    attempts      Int      @default(0)
+    lastError     String? @map("last_error")
+
+    @@index([publishedAt, occurredAt], where: sql`(published_at IS NULL)`, name: "domain_event_unpublished")
+    @@index([aggregateType, aggregateId])
+    @@map("domain_event")
+  }
+
+  /// Per-consumer processed-event record for idempotent handling.
+  model ProcessedEvent {
+    consumer    String
+    eventId     Ref @map("event_id")
+    processedAt Instant @map("processed_at")
+
+    @@id([consumer, eventId])
+    @@map("processed_event")
+  }
+
+  /// Registered mobile app installation (team app).
+  model DeviceInstallation {
+    id            Id             @id
+    userId        Ref @map("user_id")
+    user          identity.User  @relation(fields: [userId], references: [id])
+    platform      DevicePlatform
+    appVersion    String @map("app_version")
+    deviceModel   String? @map("device_model")
+    hubId         Ref? @map("hub_id")
+    hub           hub.Hub?       @relation(fields: [hubId], references: [id])
+    lastSeenAt    Instant? @map("last_seen_at")
+    lastSyncAt    Instant? @map("last_sync_at")
+    /// Reported by the device on each sync heartbeat.
+    pendingCount  Int            @default(0) @map("pending_count")
+    oldestPendingAt Instant? @map("oldest_pending_at")
+    revokedAt     Instant? @map("revoked_at")
+    revokedReason String? @map("revoked_reason")
+    +Timestamps
+
+    @@index([userId])
+    @@index([hubId, pendingCount])
+    @@map("device_installation")
+  }
+
+  /// Server-side ledger of every mobile submission (PRD §9.9, §10.6).
+  /// idempotencyKey dedupes retries. Quarantined payloads are retained for
+  /// controlled review (encrypt at the application layer).
+  model SyncSubmission {
+    id               Id                 @id
+    idempotencyKey   String             @unique @map("idempotency_key")
+    deviceInstallationId Ref @map("device_installation_id")
+    device           DeviceInstallation @relation(fields: [deviceInstallationId], references: [id])
+    userId           Ref @map("user_id")
+    user             identity.User      @relation("SyncUser", fields: [userId], references: [id])
+    hubId            Ref? @map("hub_id")
+    hub              hub.Hub?           @relation(fields: [hubId], references: [id])
+    sessionId        Ref? @map("session_id")
+    encounterId      Ref? @map("encounter_id")
+    encounter        clinical.Encounter? @relation(fields: [encounterId], references: [id])
+    entityType       String @map("entity_type")
+    entityId         Ref @map("entity_id")
+    operation        String
+    clientCreatedAt  Instant @map("client_created_at")
+    serverReceivedAt Instant @map("server_received_at")
+    status           SyncStatus
+    errorCategory    SyncErrorCategory? @map("error_category")
+    /// Human-readable, non-sensitive.
+    errorMessage     String? @map("error_message")
+    retryCount       Int                @default(0) @map("retry_count")
+    quarantinedPayload Json? @map("quarantined_payload")
+    resolvedAt       Instant? @map("resolved_at")
+    resolvedById     Ref? @map("resolved_by_id")
+    resolvedBy       identity.User?     @relation("SyncResolvedBy", fields: [resolvedById], references: [id])
+    resolutionNote   String? @map("resolution_note")
+
+    @@index([hubId, status])
+    @@index([encounterId])
+    @@index([deviceInstallationId, serverReceivedAt], name: "sync_submission_device_received")
+    @@check(expression: sql`status NOT IN ('rejected', 'quarantined') OR error_category IS NOT NULL`, name: "sync_error_category")
+    @@map("sync_submission")
+  }
+
+  /// Outbound notification log. Content is generic + authenticated deep link;
+  /// never diagnoses, vitals or prescriptions (PRD §8.12).
+  model Notification {
+    id              Id                  @id
+    recipientType   RecipientType @map("recipient_type")
+    patientId       Ref? @map("patient_id")
+    patient         clinical.Patient?   @relation(fields: [patientId], references: [id])
+    userId          Ref? @map("user_id")
+    user            identity.User?      @relation(fields: [userId], references: [id])
+    templateCode    String @map("template_code")
+    channel         NotificationChannel
+    language        String              @default("bn")
+    deepLink        String? @map("deep_link")
+    relatedType     String? @map("related_type")
+    relatedId       Ref? @map("related_id")
+    isServiceCritical Boolean           @default(false) @map("is_service_critical")
+    status          NotificationStatus  @default(queued)
+    provider        String?
+    providerMessageId String? @map("provider_message_id")
+    queuedAt        Instant @map("queued_at")
+    sentAt          Instant? @map("sent_at")
+    deliveredAt     Instant? @map("delivered_at")
+    failureReason   String? @map("failure_reason")
+    /// Staff inbox read marker (in_app channel).
+    readAt          Instant? @map("read_at")
+
+    @@index([patientId, queuedAt])
+    @@index([userId, queuedAt])
+    @@index([status, queuedAt])
+    @@check(expression: sql`(recipient_type = 'patient' AND patient_id IS NOT NULL) OR (recipient_type = 'staff' AND user_id IS NOT NULL)`, name: "notification_recipient")
+    @@map("notification")
+  }
+
+  model NotificationPreference {
+    id        Id                  @id
+    patientId Ref @map("patient_id")
+    patient   clinical.Patient    @relation(fields: [patientId], references: [id])
+    category  String
+    channel   NotificationChannel
+    enabled   Boolean             @default(true)
+    +Timestamps
+
+    @@index([patientId, category, channel], unique: true, name: "notification_pref_unique")
+    @@map("notification_preference")
+  }
+
+  /// Purpose-bound, approved, logged exports (PRD §6.4, §8.11).
+  model DataExport {
+    id            Id            @id
+    requestedById Ref @map("requested_by_id")
+    requestedBy   identity.User @relation("ExportRequestedBy", fields: [requestedById], references: [id])
+    reportCode    String @map("report_code")
+    purpose       String
+    scopeRegionId Ref? @map("scope_region_id")
+    scopeHubId    Ref? @map("scope_hub_id")
+    dateFrom      DateString? @map("date_from")
+    dateTo        DateString? @map("date_to")
+    patientLevel  Boolean       @default(false) @map("patient_level")
+    includesClinicalData Boolean @default(false) @map("includes_clinical_data")
+    status        ExportStatus  @default(requested)
+    approvedById  Ref? @map("approved_by_id")
+    approvedBy    identity.User? @relation("ExportApprovedBy", fields: [approvedById], references: [id])
+    approvedAt    Instant? @map("approved_at")
+    generatedAt   Instant? @map("generated_at")
+    rowCount      Int? @map("row_count")
+    fileRef       String? @map("file_ref")
+    expiresAt     Instant? @map("expires_at")
+    createdAt     CreatedAt @map("created_at")
+
+    @@index([requestedById, createdAt])
+    @@check(expression: sql`NOT patient_level OR status IN ('requested', 'rejected') OR approved_by_id IS NOT NULL`, name: "export_patient_level_approval")
+    @@map("data_export")
+  }
+}

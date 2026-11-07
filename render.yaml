@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: healora-hub-backend
+    runtime: docker
+    repo: https://github.com/kopotrahman/healora-hub-backend
+    branch: master
+    plan: free
+    region: singapore
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /docs
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: API_DOCS
+        value: on
+      - key: REQUIRE_MFA_FOR_PRIVILEGED
+        value: "true"
+      - key: AUTH_DEV_TOKENS
+        value: "false"
+      - key: TRUST_PROXY_HOPS
+        value: "1"
+      - key: JWT_SECRET
+        generateValue: true
+      - key: AUTH_ENCRYPTION_KEY
+        generateValue: true
+      - key: IDENTIFIER_HASH_KEY
+        generateValue: true

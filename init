@@ -1,0 +1,13 @@
+'use strict';
+
+import fs from 'node:fs';
+import path from 'node:path';
+
+const tempDir = path.join(process.cwd(), '.tmp');
+
+try {
+  fs.mkdirSync(tempDir, { recursive: true });
+} catch (error) {
+  console.error(`Could not create temporary directory ${tempDir}`, error);
+  process.exitCode = 1;
+}

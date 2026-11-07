@@ -1,0 +1,11 @@
+.git
+.env
+.env.*
+!.env.example
+node_modules
+dist
+.tmp
+.alchemy
+.prisma-composer
+scripts/.e2e-state.json
+npm-debug.log*
