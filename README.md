@@ -145,3 +145,5 @@ npm run docs:routes                      # regenerate docs/ROUTES.md
 ## Release gates the code cannot satisfy (PRD §17.4)
 - **Hosting region:** `prisma.config.ts` still targets Prisma Cloud **us-east-1** from the starter template. That conflicts with the Bangladesh data-residency requirement (PRD §17.2). Choose a Bangladesh-hosted PostgreSQL before storing any real patient data.
 - **Legal and clinical approvals:** licensing, health-worker scope, clinical thresholds and protocols, consent wording, the retention schedule, overseas specialist access, and emergency SOPs all need sign-off from qualified reviewers. The system stores and enforces these once they are approved, but does not invent them.
+#   h e a l o r a _ b a c k e n d  
+ 
