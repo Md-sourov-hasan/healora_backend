@@ -2,8 +2,6 @@ node_modules/
 dist/
 /.alchemy
 /.prisma-composer
-/.env
-/.env.*
 !/.env.example
 
 # e2e test state (contains a test admin password + TOTP secret)
