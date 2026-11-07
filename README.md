@@ -31,7 +31,7 @@ The repository includes a Render Blueprint in [render.yaml](render.yaml). Use th
 
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/kopotrahman/healora-hub-backend)
 
-Render builds the Docker image, enables Swagger in production, and generates three distinct secrets. After the first successful deploy, Swagger is at `https://<your-render-service>.onrender.com/docs`. The service serves the documentation without a database; API operations need `DATABASE_URL` set to a provisioned PostgreSQL database.
+Render builds the Docker image, creates a PostgreSQL database, connects it through `DATABASE_URL`, initializes the Prisma contract, and generates three distinct secrets. After deploy, Swagger is at `https://<your-render-service>.onrender.com/docs`. This Blueprint uses Render's Singapore region and a free 1 GB database that expires after 30 days; use dummy/test data only. Export the demo data before expiry or upgrade the database to a paid plan to keep it.
 
 The Blueprint runs the service in Render's Singapore region. The production data policy below requires health data to stay in Bangladesh, so use this setup for Swagger/demo access only unless your hosting and data-transfer setup has been approved for production.
 
