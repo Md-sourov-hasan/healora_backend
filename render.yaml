@@ -16,7 +16,7 @@ services:
     plan: free
     region: singapore
     dockerfilePath: ./Dockerfile
-    dockerCommand: "sh -c 'npm run db:init -- --yes && npm start'"
+    dockerCommand: npm run start:render
     healthCheckPath: /docs
     envVars:
       - key: NODE_ENV

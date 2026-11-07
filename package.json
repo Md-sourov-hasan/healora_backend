@@ -23,6 +23,7 @@
     "migration:status": "prisma migration status",
     "skills:sync": "prisma skills sync || exit 0",
     "start": "node init && node dist/server.mjs",
+    "start:render": "node init && npm run db:init -- --yes && node dist/server.mjs",
     "postinstall": "prisma skills sync || exit 0",
     "test:authz": "tsx --env-file-if-exists=.env scripts/authz-sweep.ts",
     "test:auth": "tsx --env-file-if-exists=.env scripts/test-auth-flow.ts",
