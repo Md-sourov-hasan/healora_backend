@@ -51,6 +51,7 @@ async function bootstrap() {
 
   // After the security headers so /docs can override the API-wide CSP.
   setupApiDocs(app);
+  app.getHttpAdapter().getInstance().get("/", (_req, res) => res.redirect("/docs"));
 
   app.enableShutdownHooks();
   const rawPort = (process.env.PORT ?? "").trim();
